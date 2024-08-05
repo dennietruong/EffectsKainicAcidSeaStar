@@ -1,0 +1,1174 @@
+
+# Data analysis for Kainic Acid experiment
+# Insert chunk quickly using: Ctrl+Alt+I
+# Comment codes: Ctrl+Shift+C
+
+
+
+```{r}
+# 1: Getting Started -----------------------------------------------------------
+# > 1.1: Clear everything ----- 
+# clear workspace
+# rm(list=ls()) # Commented out to avoid wiping someone's environment
+
+# clear console
+cat("\014")
+```
+
+
+```{r}
+# > 1.2: Load packages ---------------------------------------------------------
+library(dplyr) # data wrangling
+library(tidyr) # tidyr
+library(ggplot2) # plotting
+library(glmmTMB) # generalized linear mixed effects models
+library(DHARMa) # glm diagnostics
+library(here) # here
+library(viridis) # viridis color ramps
+library(splines) # splines
+library(MuMIn) # multimodel inference
+library(survival) # survival analyses
+library(coxme) # mixed effects Cox models
+library(ehahelper) # event history analysis helper, predict_coxme
+library(emmeans)
+library(nnet) # for multinomial logistic regression
+library(patchwork) # arranging plot panels
+library(viridis)
+library(png)
+```
+
+```{r}
+#To download ehahelper package
+# library(devtools)
+# install_github('junkka/ehahelper')
+```
+
+
+```{r}
+# > 1.3: Working directory with here() -----------------------------------------
+here::i_am("SSKAResult.Rmd")
+```
+
+
+```{r}
+# > 1.4: Read in data ----
+data = read.csv(here("ResponseVariableCode.csv"))
+metadata = read.csv(here("BaselineCode.csv"))
+
+# second metadata for cell count analyses
+data_counts = read.csv("CellCounts2.csv")
+```
+
+
+```{r}
+# > 1.5: Data preparation ------------------------------------------------------
+data$Date2 = as.Date(data$Date,
+                     format = "%m/%d/%y") # convert to date
+data$Day = data$Date2 - min(data$Date2) # subtract dates to convert to days
+data$Day = as.numeric(data$Day) # convert days to numeric days
+data$Day = data$Day - 4 # make time = 0 at experiment start day
+# Assign NAs to pre-experiment time points
+data$Day = ifelse(data$Day < 0, # if the day is negative
+                  NA, # make NA
+                  data$Day) # else assign the same day
+
+data$Treatment = as.factor(data$Treatment) # make Treatment a factor
+data$Tank = as.factor(paste0("T",data$Tank)) # make Tank a factor, tack on "T" to read as characters
+data$SSID = as.factor(data$SSID)  # make SSID a factor
+
+# Attach baseline arm circumference
+metadata$ArmCircumferenceBase = metadata$ArmCircumference
+metadata$ArmCircumference = NULL
+metadata$Date = NULL
+metadata$RightingTime = NULL
+metadata$Treatment = NULL
+metadata$Tank = NULL
+metadata$Mass = NULL
+metadata$Color = NULL
+
+# Merge metadata and data
+metadata = merge(metadata,
+                 data[is.na(data$Day), c("SSID", "RightingTime")])
+metadata$RightingTimeBase = metadata$RightingTime
+metadata$RightingTime = NULL
+
+data = merge(data, metadata, by = "SSID")
+
+# Add seatable
+ST1 = c("T1", "T2", "T3", "T4", "7", "T8", "T9", "T10")
+ST2 = c("T5", "T6", "T11", "T12")
+
+data$Seatable = ifelse(data$Tank %in% ST1,
+                       "Seatable 1",
+                       "Seatable 2")
+data$Seatable = as.factor(data$Seatable)
+
+# Calculate righting times and arm circumferences as proportions of 
+# pre-exp/baseline values
+data$ArmCircProp = data$ArmCircumference / data$ArmCircumferenceBase
+data$RightingTimeProp = data$RightingTime / data$RightingTimeBase
+
+# Separate experiment data and baseline data 
+# We'll only analyze the experiment data
+data_exp = data[!is.na(data$Day),]
+data_base = data[is.na(data$Day),]
+
+
+
+#Cell DATA
+# Here, we think that spherule and vibratile cells are really 
+# transition cells, so we sum them
+data_counts$Transition = 
+  data_counts$Transition +
+  data_counts$Spherule +
+  data_counts$Vibratile
+
+data_counts$Spherule = NULL
+data_counts$Vibratile = NULL
+
+# We are going to treat this as activated v unactivated cells
+# So transition and filopodial is activated
+data_counts2 <- data_counts #Make new dataframe
+data_counts2$Activated = 
+  data_counts2$Transition +
+  data_counts2$Filopodial
+data_counts2$Unactivated = 
+  data_counts2$Petaloid
+
+data_counts2$Transition = NULL
+data_counts2$Petaloid = NULL
+data_counts2$Filopodial = NULL
+```
+
+
+
+
+
+# 2: Analyses ------------------------------------------------------------------
+```{r}
+# > 2.1: Models ----------------------------------------------------------------
+# Righting Time
+
+# Because the regular Gamma GLM wasn't flexible enough to account for the rapid 
+# change in righting time over time, we'll use natural cubic splines with Day 
+# to add some wiggliness.
+
+# Generally, we want to choose a model flexible enough to represent the data
+# but not so flexible that it exactly reproduces the data. Exactly reproducing
+# the data results from what is called "overfitting", which tends to make the 
+# model less applicable outside of the dataset (e.g. applied to the real world)
+
+# spline with 5 degrees of freedom (most flexible)
+modRT_treat5 = glmmTMB(RightingTimeProp ~ 
+                         Treatment *
+                         ns(Day, df = 5) + 
+                         (1|Seatable/Tank/SSID),
+                       data = data_exp,
+                       family = Gamma(link = "log"))
+# spline with 4 degrees of freedom 
+modRT_treat4 = glmmTMB(RightingTimeProp ~ 
+                         Treatment *
+                         ns(Day, df = 4) + 
+                         (1|Seatable/Tank/SSID),
+                       data = data_exp,
+                       family = Gamma(link = "log"))
+summary(modRT_treat4)
+simulateResiduals(modRT_treat4, plot = TRUE)
+# spline with 3 degrees of freedom 
+modRT_treat3 = glmmTMB(RightingTimeProp ~ 
+                         Treatment *
+                         ns(Day, df = 3) + 
+                         (1|Seatable/Tank/SSID),
+                       data = data_exp,
+                       family = Gamma(link = "log"))
+# spline with 2 degrees of freedom 
+modRT_treat2 = glmmTMB(RightingTimeProp ~ 
+                         Treatment *
+                         ns(Day, df = 2) + 
+                         (1|Seatable/Tank/SSID),
+                       data = data_exp,
+                       family = Gamma(link = "log"))
+# no spline (least flexible)
+modRT_treat = glmmTMB(RightingTimeProp ~ 
+                        Treatment *
+                        Day + 
+                        (1|Seatable/Tank/SSID),
+                      data = data_exp,
+                      family = Gamma(link = "log"))
+```
+
+
+
+Checking AICs for model fit
+```{r}
+pairs(emmeans(modRT_treat4,
+              ~ Treatment))
+
+# DHARMa residuals are used to diagnose/detect problems in generalized linear
+# models. You'll see red here, which means there are some potential issues, but
+# it doesn't mean the model is useless (poor residuals do not necessarily mean
+# a bad model, and lack of problem detection also does not guarantee a good 
+# model)
+simulateResiduals(modRT_treat4,
+                  plot = TRUE)
+# You could do the above with any of the models to check them
+
+# null model
+modRT_null = glmmTMB(RightingTimeProp ~ ns(Day, df = 4) + (1|Seatable/Tank/SSID),
+                     data = data_exp,
+                     family = Gamma(link = "log"))
+
+summary(modRT_null)
+
+# AICc is Akaike's Information Criterion, corrected for small sample sizes. It
+# is a relative measure of the balance between including informative variables
+# and the risk of overfitting. A low AIC or AICc value corresponds to a better
+# model, but only relative to values of other models of the same structure of 
+# the same data (an AIC value is meaningless itself and comparing AIC values
+# across datasets isn't valid). A model with many, uninformative variables will
+# have a high AIC value, while a model with few, very informative variables
+# will have a low AIC value. Below we compare the AICc values of our models, 
+# mainly to determine the degree of spline flexibility. This technique is called
+# multimodel inference and derives from "information theoretic" approaches.
+
+AICc(modRT_null,
+     modRT_treat,
+     modRT_treat2,
+     modRT_treat3,
+     modRT_treat4, # lowest AICc!
+     modRT_treat5)
+# Notice how AICc increases for the last model with the spline df = 5. This
+# suggests that increasing the wiggliness/complexity of the model no longer
+# improves the "information" the model has incorporated from the data.
+
+# This is an alternative way to compare models called the likelihood ratio test 
+# or LRT. LRTs only compare two models at a time, which is useful when you have
+# just a null model and a hypothesized model (this is conveniently the case with
+# arm circumference). We can also do a step-wise model selection with LRT,
+# comparing models of increasing complexity until they stop being significantly
+# different from each other.
+# null vs. treatment (no spline)
+anova(modRT_null,
+      modRT_treat,
+      test = "Chisq") # significant
+
+# treatment (no spline) vs. treatment w/ df=2 spline 
+anova(modRT_treat,
+      modRT_treat2,
+      test = "Chisq") # significant
+
+# treatment w/ df=2 spline vs. treatment w/ df=3 spline 
+anova(modRT_treat2,
+      modRT_treat3,
+      test = "Chisq") # significant
+
+# treatment w/ df=3 spline vs. treatment w/ df=4 spline 
+anova(modRT_treat3,
+      modRT_treat4,
+      test = "Chisq") # significant
+
+# treatment w/ df=4 spline vs. treatment w/ df=5 spline 
+anova(modRT_treat4,
+      modRT_treat5,
+      test = "Chisq") # nonsignificant
+
+# Lastly, just as a check, let's compare the df=4 spline to the null model
+# treatment w/ df=4 spline vs. null
+anova(modRT_treat4,
+      modRT_null,
+      test = "Chisq") # significant
+
+# Here, both the information theoretic (AICc) approach and stepwise LRTs gave
+# us the same result - the model including the df=4 spline is the best model.
+
+# Let's inspect the model
+# Generally, I try to do this at the end of model comparison/selection to avoid
+# biasing myself towards significant results.
+summary(modRT_treat4)
+# Whoa, lots of stars! I mentioned this before, but these by-paramter tests, 
+# called "Wald tests" can have a number of issues, to the degree that some 
+# package writers explicitly do not provide them. So while the significant 
+# p-values are enticing, we have to take them with a grain of salt. Sometimes 
+# parameters or variables are non-significant by matter a lot in the prediction. 
+# Sometimes weak or unimportant parameters are significant, which can happen 
+# easily when you have many data points (though we don't have that many points).
+# Still these estimates and related values tell you how each variable "tunes" 
+# the model, so this output is nonetheless valuable to look at.
+
+# (Personally, the df = 4 spline model still feels too wiggly, but that's what
+# the methods highlighted as the best... Oh well!)
+```
+
+
+
+```{r}
+banana = data.frame(ns(seq(0,7,1), df = 4))
+banana$sum = banana$X1 + banana$X2 + banana$X3 + banana$X4
+banana$X1_beta = banana$X1 * -1.7873
+banana$X2_beta = banana$X1 * -0.8287
+banana$X3_beta = banana$X1 * -2.5827
+banana$X4_beta = banana$X1 * -1.0178
+banana$sum_beta = banana$X1_beta + banana$X2_beta + banana$X3_beta + banana$X4_beta
+
+plot(banana$X1 ~ seq(0,7,1), type = "l", col = "red", ylim = c(- 0.5, 1))
+lines(banana$X2 ~ seq(0,7,1), type = "l", col = "blue")
+lines(banana$X3 ~ seq(0,7,1), type = "l", col = "green")
+lines(banana$X4 ~ seq(0,7,1), type = "l", col = "purple")
+lines(banana$sum ~ seq(0,7,1), type = "l", col = "black")
+
+attr(terms(modRT_treat4), "predvars")
+```
+
+
+```{r}
+# ArmCirc
+modAC_treat = glmmTMB(ArmCircProp ~ Treatment * Day + (1|Seatable/Tank/SSID),
+                      family = gaussian(),
+                      data = data_exp)
+
+simulateResiduals(modAC_treat,
+                  plot = TRUE)
+
+modAC_null = glmmTMB(ArmCircProp ~ Day + (1|Seatable/Tank/SSID),
+                     family = gaussian(),
+                     data = data_exp)
+
+summary(modAC_null)
+
+summary(modAC_treat)
+```
+
+
+
+# 2.2: Likelihood Ratio Test -------------------------------------------------
+```{r}
+# null righting time model vs. df = 4 spline (same as above)
+#Use this p-value to report on poster
+anova(modRT_null,
+      modRT_treat4,
+      test = "Chisq")
+
+
+# null arm circumference vs. including Treatment (no spline needed here)
+#Use this p-value to report on poster
+anova(  modAC_null,
+      modAC_treat,
+      test = "Chisq")
+```
+
+
+# Check to see if stars recovered
+```{r}
+#Modify dataframe to just Day 7 info
+data_Day7 = data_exp[data_exp$Day == 7, ]
+
+
+#Righting Time Analysis
+modRT_treat_Day7 = glmmTMB(RightingTimeProp ~ Treatment + (1|Seatable/Tank),
+                       data = data_Day7,
+                       family = Gamma(link = "log"))
+
+modRT_null_Day7 = glmmTMB(RightingTimeProp ~ (1|Seatable/Tank),
+                     data = data_Day7,
+                     family = Gamma(link = "log"))
+
+
+anova(modRT_null_Day7,
+      modRT_treat_Day7,
+      test = "Chisq")
+
+
+#Arm Circumference Analysis
+modAC_treat_Day7 = glmmTMB(ArmCircProp ~ Treatment + (1|Seatable/Tank),
+                      family = gaussian(),
+                      data = data_Day7)
+
+modAC_null_Day7 = glmmTMB(ArmCircProp ~ (1|Seatable/Tank),
+                     family = gaussian(),
+                     data = data_Day7)
+
+
+anova(modAC_null_Day7,
+      modAC_treat_Day7,
+      test = "Chisq")
+```
+
+
+
+# 2.3: Simulate predictions --------------------------------------------------
+```{r}
+# Create a data frame with all Day and Treatment combinations for use in
+# extracting model predictions. Note that we set the Tank and SSID to be the
+# same for everything. At a later step, we tell the predict function to not
+# include the random effects (Tank and SSID), so we don't need to include all
+# of them in this data frame.
+data_pred = data.frame(Treatment = c(rep("PBS", 29),
+                                     rep("1X_KA", 29),
+                                     rep("10X_KA", 29)),
+                       Day = rep(seq(0,7,0.25), 3),
+                       Tank = rep("T1" ,87),
+                       SSID = rep("1A", 87))
+length(seq(0,7,0.25))
+# Use the predict function to extract model predictions for righting time
+resRT_pred = predict(modRT_treat4, # our best model
+                     newdata = data_pred, # the prediction data frame
+                     se.fit = TRUE, # yes, we want the standard errors computed
+                     type = "response", # predictions as original scale
+                     re.form = ~ 0) # ignore random effects
+
+data_pred$RightingTimeProp = resRT_pred$fit # attach prediction to data frame
+data_pred$RightingTimePropSE = resRT_pred$se.fit # attach SE to data frame
+
+# Do the same as above for arm ciricumference
+resAC_pred = predict(modAC_treat,
+                     newdata = data_pred,
+                     se.fit = TRUE,
+                     type = "response",
+                     re.form = ~ 0)
+
+data_pred$ArmCircProp = resAC_pred$fit
+data_pred$ArmCircPropSE = resAC_pred$se.fit
+```
+
+
+
+# 2.4: Plot predictions ------------------------------------------------------
+```{r}
+# Aggregate righting time data into means and standard deviations
+RightingTimeMSD = data_exp %>%
+  group_by(Treatment, Day) %>% # group by Treatment and Day
+  summarise(M = mean(RightingTimeProp), # Mean
+            SD = sd(RightingTimeProp), # Standard Deviation
+            SE = SD/sqrt(length(RightingTimeProp))) #Standard Error
+
+# Plot Righting Time Data and Predictions
+plot_predRightTime = ggplot() +
+  geom_ribbon(aes(x = Day, # plot 95% CI for model predictions as shaded ribbon
+                  ymin = RightingTimeProp - (1.96 * RightingTimePropSE),
+                  ymax = RightingTimeProp + (1.96 * RightingTimePropSE),
+                  fill = Treatment),
+              alpha = 0.2,
+              data = data_pred) +
+  geom_line(aes(x = Day, # plot model predictions
+                y = RightingTimeProp,
+                color = Treatment),
+            size = 0.5,
+            data = data_pred) +
+  geom_point(aes(x = Day, # plot individual observed data points
+                y = RightingTimeProp,
+                color = Treatment,
+                group = SSID),
+            position = position_dodge(0.2), # dodging to prevent overlap
+            size = 1,
+            alpha = 0.2,
+            data = data_exp) +
+  geom_errorbar(aes(x = Day, # plot standard error bars for observed data points
+                    ymin = M - SE,
+                    ymax = M + SE,
+                    group = Treatment),
+                width = 0,
+                position = position_dodge(0.2), # dodging to prevent overlap
+                data = RightingTimeMSD,
+                size = 0.4) +
+  geom_point(aes(x = Day, # plot means for observed data points
+                 y = M,
+                 fill = Treatment),
+             size = 2,
+             shape = 21,
+             position = position_dodge(0.2), # dodging to prevent overlap
+             data = RightingTimeMSD) +
+  scale_color_manual(values = c("firebrick",
+                                "darkorange",
+                                "deepskyblue"),
+                     labels = c("KA, 30 ppm",
+                                "KA, 3 ppm",
+                                "PBS")) +
+  scale_fill_manual(values = c("firebrick",
+                               "darkorange",
+                               "deepskyblue"),
+                    labels = c("KA, 30 ppm",
+                               "KA, 3 ppm",
+                               "PBS")) +
+  labs(x = "Experiment Day",
+       y = "Righting Time \n(proportion of pre-exp.)") +
+  coord_cartesian(xlim = c(-0.2, 7.2),
+                  ylim = c(0, 20),
+                  expand = FALSE) +
+  theme_bw() +
+  theme(panel.border = element_rect(fill = NA)) +
+  theme(axis.text = element_text(size = 8), 
+        axis.title = element_text(size = 9),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(0.5, 'mm'),
+        axis.title.x = element_text(size = 9),  # Set the x-axis label size
+        axis.title.y = element_text(size = 9)) +  # Set the y-axis label size
+  theme(legend.position = c(0.83,0.87)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())  #Remove gridlines
+
+plot_predRightTime
+```
+
+
+
+From Reyn's Code
+```{r}
+# Plot Arm Circumference Data and Predictions
+plot_predArmCirc1 = ggplot() +
+  geom_ribbon(aes(x = Day,
+                  ymin = ArmCircProp - (1.96 * ArmCircPropSE),
+                  ymax = ArmCircProp + (1.96 * ArmCircPropSE),
+                  fill = Treatment),
+              alpha = 0.2,
+              data = data_pred) +
+  geom_line(aes(x = Day,
+                y = ArmCircProp,
+                color = Treatment),
+            size = 1,
+            data = data_pred) +
+  geom_line(aes(x = Day,
+                y = ArmCircProp,
+                color = Treatment,
+                group = SSID),
+            linetype = "dashed",
+            size = 0.5,
+            alpha = 0.3,
+            data = data_exp) +
+  scale_color_manual(values = c("firebrick",
+                                "darkorange",
+                                "deepskyblue")) +
+  scale_fill_manual(values = c("firebrick",
+                               "darkorange",
+                               "deepskyblue")) +
+  labs(x = "Experiment Day",
+       y = "Arm Circumference\n(proportion of pre-exp.)") +
+  theme_classic()
+
+plot_predArmCirc1
+```
+
+
+
+Modify to include mean & lines
+```{r}
+# Aggregate righting time data into means and standard deviations
+ArmCircMSD = data_exp %>%
+  group_by(Treatment, Day) %>% # group by Treatment and Day
+  summarise(M = mean(ArmCircProp), # Mean
+            SD = sd(ArmCircProp), # Standard Deviation
+            SE = SD/sqrt(length(ArmCircProp))) #Standard Error
+
+
+# Plot Arm Circumference Data and Predictions
+plot_predArmCirc = ggplot() +
+  geom_ribbon(aes(x = Day,
+                  ymin = ArmCircProp - (1.96 * ArmCircPropSE),
+                  ymax = ArmCircProp + (1.96 * ArmCircPropSE),
+                  fill = Treatment),
+              alpha = 0.2,
+              data = data_pred) +
+  geom_line(aes(x = Day,
+                y = ArmCircProp,
+                color = Treatment),
+            size = 0.5,
+            data = data_pred) +
+  geom_point(aes(x = Day,        # plot individual observed data points
+                y = ArmCircProp,
+                color = Treatment,
+                group = SSID),
+            size = 1,
+            alpha = 0.3,
+            data = data_exp) +
+  geom_errorbar(aes(x = Day, # plot standard error bars for observed data points
+                    ymin = M - SE,
+                    ymax = M + SE,
+                    group = Treatment),
+                width = 0,
+                position = position_dodge(0.2), # dodging to prevent overlap
+                data = ArmCircMSD,
+                size = 0.4) +
+  geom_point(aes(x = Day, # plot means for observed data points
+                 y = M,
+                 fill = Treatment),
+             size = 2,
+             shape = 21,
+             position = position_dodge(0.2), # dodging to prevent overlap
+             data = ArmCircMSD) +
+  #geom_vline(xintercept = c(1, 2.5, 5),
+             #alpha = 0.25,
+             #linetype = 2) +
+  scale_color_manual(values = c("firebrick",
+                                "darkorange",
+                                "deepskyblue"),
+                     labels = c("KA, 30 ppm",
+                                "KA, 3 ppm",
+                                "PBS")) +
+  scale_fill_manual(values = c("firebrick",
+                               "darkorange",
+                               "deepskyblue"),
+                    labels = c("KA, 30 ppm",
+                               "KA, 3 ppm",
+                               "PBS")) +
+  labs(x = "Experiment Day",
+       y = "Arm Circumference\n(proportion of pre-exp.)") +
+  coord_cartesian(xlim = c(-0.2, 7.2),
+                  ylim = c(0.5, 1.1),
+                  expand = FALSE) +
+  theme_bw() +
+  theme(panel.border = element_rect(fill = NA)) +
+  theme(axis.text = element_text(size = 8), 
+        axis.title = element_text(size = 9),
+        axis.title.x = element_text(size = 9),  # Set the x-axis label size
+        axis.title.y = element_text(size = 9)) +  # Set the y-axis label size)
+  theme(legend.position = 'none') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())  #Remove gridlines
+  
+
+plot_predArmCirc
+```
+
+
+Put Righhting Time & Arm Circumference Plot together
+```{r}
+library(cowplot)
+
+
+Right_Arm <- plot_grid(plot_predRightTime, plot_predArmCirc, labels = "AUTO", label_size = 15, align = "v", hjust= -0.3, vjust = 2, scale = 1)
+
+
+#Paper
+tiff(filename = 'Right_Arm.tiff', height = 95, width = 169, units = "mm", res = 400) #Check resolution and format, 6 across x 4height
+
+#Presentation
+#tiff(filename = 'Right_ArmPresent.tiff', height = 95, width = 250, units = "mm", res = 400) #Check resolution and format, 6 across x4height
+
+Right_Arm #plot the plot
+
+
+dev.off() # turns off graphics device and exports the plot
+```
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# > 2.5: Cell counts -----
+# USING multinom - look into mclogit! (can accommodate random effects)
+
+# Rename variables, mainly so SSID is consistent 
+colnames(data_counts) = c("SSID",
+                          "Treatment",
+                          "Petaloid",
+                          "Filopodial",
+                          "Transition")
+
+# Relevel Treatment so PBS (control) is the baseline/intercept
+data_counts$Treatment = factor(data_counts$Treatment,
+                               levels = c("PBS",
+                                          "1KA",
+                                          "10KA"))
+# Melt to long data
+df_counts = data_counts %>%
+  pivot_longer(cols = (length(data_counts)-2):length(data_counts),
+               names_to = "Type",
+               values_to = "Count")
+
+# Relevel cell type to be ordered from most avg count to least
+df_counts$Type = factor(df_counts$Type,
+                        levels = c("Transition",
+                                   "Petaloid",
+                                   "Filopodial"))
+
+df_counts_MSE = df_counts %>%
+  group_by(Treatment, Type) %>%
+  summarise(M = mean(Count),
+            SE = sd(Count)/sqrt(length(Count)))
+
+plot_cell_MSE_clust = ggplot(aes(x = Treatment,
+           y = M,
+           fill = Type),
+       data = df_counts_MSE) +
+  geom_bar(stat = "identity",
+           position = position_dodge(0.9)) +
+  geom_errorbar(aes(x = Treatment,
+                    ymin = M - 1.96 * SE,
+                    ymax = M + 1.96 * SE),
+                width = 0,
+                position = position_dodge(0.9)) +
+  labs(x = "Treatment",
+       y = "Avg Count",
+       fill = "Cell Type") +
+  scale_fill_viridis_d(option = "mako",
+                       begin = 0.2,
+                       end = 0.8) +
+  scale_y_continuous(limits = c(0,100),
+                     expand = c(0, 0)) +
+  theme_classic() +
+  theme(legend.position = "none")
+
+plot_cell_MSE_stack = ggplot(aes(x = Treatment,
+                                 y = M,
+                                 fill = Type),
+                             data = df_counts_MSE) +
+  geom_bar(stat = "identity") +
+  labs(x = "Treatment",
+       y = "Avg Count",
+       fill = "Cell Type") +
+  scale_fill_viridis_d(option = "mako",
+                       begin = 0.2,
+                       end = 0.8) +
+  scale_y_continuous(limits = c(0,100),
+                     expand = c(0, 0)) +
+  theme_classic() +
+  theme(axis.title.y = element_blank())
+
+plot_cell_MSE_clust + plot_cell_MSE_stack + plot_layout(widths = c(2,1))
+```
+
+
+```{r}
+# Separate off a matrix of cell counts as the outcome variable
+ma_counts = as.matrix(data_counts[,(length(data_counts)-2):length(data_counts)])
+
+# Multinomial logistic regression using Treatment
+modMLR_treat = multinom(ma_counts ~ Treatment,
+                  data = data_counts)
+
+# Multinomial logistic regression null model
+modMLR_null = multinom(ma_counts ~ 1,
+                   data = data_counts)
+
+summary(modMLR_treat)
+summary(modMLR_null)
+
+# Likelihood Ratio Test
+anova(modMLR_treat,
+      modMLR_null,
+      test = "Chisq")
+
+# relative risks - A bit convoluted to interpret
+exp(coef(modMLR_treat))
+
+# p-values - Interpret carefully
+modMLR_treat_Z = summary(modMLR_treat)$coefficients / summary(modMLR_treat)$standard.errors
+(1 - pnorm(abs(modMLR_treat_Z), 0, 1)) * 2
+
+# Generate predictions (probabilities)
+modMLR_pred = predict(modMLR_treat,
+                  newdata = data.frame(Treatment = c("PBS",
+                                                     "1KA",
+                                                     "10KA")),
+                  type = "probs")
+
+# Convert into a dataframe
+modMLR_pred = data.frame(modMLR_pred)
+# Add Treatment column
+modMLR_pred$Treatment = c("PBS",
+                      "1KA",
+                      "10KA")
+
+# Melt to long
+modMLR_pred = pivot_longer(modMLR_pred,
+                       cols = 1:3,
+                       names_to = "Type",
+                       values_to = "Prob")
+
+# Relevel as before
+modMLR_pred$Type = factor(modMLR_pred$Type,
+                      levels = c("Transition",
+                                 "Petaloid",
+                                 "Filopodial"))
+
+modMLR_pred$Treatment = factor(modMLR_pred$Treatment,
+                           levels = c("PBS",
+                                      "1KA",
+                                      "10KA"))
+# Attach tank data to df_counts
+df_counts = left_join(df_counts,
+                data_exp[ ,c("SSID", "Tank")],
+                by = join_by(SSID))
+
+# Add characters to force it to be interpretted as a factor in later steps
+df_counts$Tank = paste("T",
+                     df_counts$Tank,
+                     sep=".")
+
+# Plot the observed cell type compositions
+plot_cell_obsv = ggplot() +
+  geom_bar(aes(x = SSID,
+               y = Count,
+               fill = Type),
+           stat = "identity",
+           data = df_counts) +
+  labs(x = "Sea Star",
+       y = "Cell Count",
+       fill = "Cell Type") +
+  facet_grid(. ~ Treatment,
+             scales = "free_x") +
+  scale_fill_viridis_d(option = "mako",
+                       begin = 0.2,
+                       end = 0.8) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme_classic() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90,
+                                   vjust = 0.5,
+                                   hjust = 1))
+
+# plot the multinomial logistic regression predictions
+plot_cell_pred = ggplot(aes(x = Treatment,
+                            y = Prob,
+                            fill = Type),
+                        data = modMLR_pred) +
+  geom_bar(stat = "identity") +
+  labs(x = "Treatment",
+       y = "Predicted Probability",
+       fill = "Cell Type") +
+  scale_fill_viridis_d(option = "mako",
+                       begin = 0.2,
+                       end = 0.8) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme_classic() +
+  theme()
+
+# combine the plots
+plot_cell_obsv + plot_cell_pred +
+  plot_layout(widths = c(2, 1))
+```
+
+
+
+
+
+```{r}
+# Try out Poisson GLMs
+# Count is the prediction
+# Type as a fixed effect since Count of cell type _should_ differ
+# Interaction of Treatment and Type since Count should be able to increase
+# or decrease by depending by Treatment _and_ Type
+# Interaction of Type and SSID as a random effect, to allow flexibility within
+# Sea stars (Counts cannot uniformly go up or down by SSID, _must_ differ by
+# cell Type)
+modP_treat = glmmTMB(Count ~ Type + Treatment:Type + (1|Type:SSID),
+                  family = "poisson",
+                  data = df_counts)
+# Residual checks with DHARMa - not perfect, but not terrible
+simulateResiduals(modP_treat, plot = TRUE)
+# Null model. Leave all structure except the Treatment:Type interaction
+modP_null = glmmTMB(Count ~ Type + (1|Type:SSID),
+                  family = "poisson",
+                  data = df_counts)
+# Unsurprinsingly the fit is terrible for the null model
+simulateResiduals(modP_null, plot = TRUE)
+
+summary(modP_treat)
+summary(modP_null)
+
+# LRT
+anova(modP_treat,
+      modP_null,
+      type = "Chisq")
+
+# Make prediction dataframe
+modP_pred =  data.frame(Treatment = rep(c("PBS",
+                                           "1KA",
+                                           "10KA"),
+                                         3),
+                       Type = c(rep("Transition",3),
+                                rep("Petaloid",3),
+                                rep("Filopodial",3)),
+                       SSID = rep("7B", 9))
+
+# Generate predictions
+banana = predict(modP_treat,
+                 newdata = modP_pred,
+                 re.form = ~ 0, # give predictions regardless of random effect
+                 type = "response", # we want the outcome predicted
+                 se.fit = TRUE # give the standard error
+)
+# attach predictions to prediction dataframe
+modP_pred$pred = banana$fit
+modP_pred$se = banana$se.fit
+rm(banana) # get rid of the temporary dataframe
+
+# Relevel as before
+modP_pred$Type = factor(modP_pred$Type,
+                          levels = c("Transition",
+                                     "Petaloid",
+                                     "Filopodial"))
+
+modP_pred$Treatment = factor(modP_pred$Treatment,
+                               levels = c("PBS",
+                                          "1KA",
+                                          "10KA"))
+
+# Plot as stacked bars for similarity to other plots
+plot_modP_stack = ggplot(aes(x = Treatment,
+           y = pred,
+           fill = Type),
+       data = modP_pred) +
+  geom_bar(stat = "identity") +
+  labs(x = "Treatment",
+       y = "Predicted Count",
+       fill = "Cell Type") +
+  scale_fill_viridis_d(option = "mako",
+                       begin = 0.2,
+                       end = 0.8) +
+  scale_y_continuous(limits = c(0,100),
+                     expand = c(0, 0)) +
+  theme_classic() +
+  theme(axis.title.y = element_blank())
+
+# Plot as clustered bars, can show errors (95% CI)
+plot_modP_clust = ggplot(aes(x = Treatment,
+           y = pred,
+           fill = Type),
+       data = modP_pred) +
+  geom_bar(stat = "identity",
+           position = position_dodge(0.9)) +
+  geom_errorbar(aes(x = Treatment,
+                    ymin = pred - 1.96 * se,
+                    ymax = pred + 1.96 * se),
+                width = 0,
+                position = position_dodge(0.9)) +
+  labs(x = "Treatment",
+       y = "Predicted Count",
+       fill = "Cell Type") +
+  scale_fill_viridis_d(option = "mako",
+                       begin = 0.2,
+                       end = 0.8) +
+  scale_y_continuous(limits = c(0,100),
+                     expand = c(0, 0)) +
+  theme_classic() +
+  theme(legend.position = "none")
+
+plot_modP_clust + plot_modP_stack +
+  plot_layout(widths = c(2, 1))
+```
+
+
+
+
+```{r}
+# Cell counts as binary: ----
+# If transition or filopodial, we consider the coelomocyte "activated"
+# Calculate proportion of cells active and totals:
+data_counts$active = data_counts$Transition + data_counts$Filopodial
+data_counts$total = data_counts$active + data_counts$Petaloid
+data_counts$active = data_counts$active / data_counts$total
+```
+
+
+```{r}
+# Attach Tank identity to data (from baseline data)
+data_counts = left_join(data_counts,
+                        data_base[ , c("SSID", "Tank", "Seatable")],
+                        by = join_by(SSID))
+
+# Set up treatment and null models
+modAct_treat = glmmTMB(active ~ Treatment + (1|Seatable/Tank/SSID),
+                       family = "binomial",
+                       weights = total,
+                       data = data_counts)
+modAct_null = glmmTMB(active ~ (1|Seatable/Tank/SSID),
+                       family = "binomial",
+                       weights = total,
+                       data = data_counts)
+
+# Likelihood ratio test
+anova(modAct_null,
+      modAct_treat,
+      test = "Chisq")
+```
+
+
+#Cell Figure for paper
+```{r}
+# Rename variables, mainly so SSID is consistent 
+colnames(data_counts2) = c("SSID",
+                          "Treatment",
+                          "Activated",
+                          "Unactivated")
+
+# Relevel Treatment so PBS (control) is the baseline/intercept
+data_counts2$Treatment = factor(data_counts2$Treatment,
+                               levels = c("PBS",
+                                          "1KA",
+                                          "10KA"))
+# Melt to long data
+df_counts2 = data_counts2 %>%
+  pivot_longer(cols = (length(data_counts2)-1):length(data_counts2),
+               names_to = "Type",
+               values_to = "Count")
+
+# Relevel cell type to be ordered from most avg count to least
+df_counts2$Type = factor(df_counts2$Type,
+                        levels = c("Activated",
+                                   "Unactivated"))
+
+df_counts_MSE2 = df_counts2 %>%
+  group_by(Treatment, Type) %>%
+  summarise(M = mean(Count),
+            SE = sd(Count)/sqrt(length(Count)))
+
+#Bar Plot
+plot_cell_MSE_clust2 = ggplot(aes(x = Treatment,
+           y = M,
+           fill = Type),
+       data = df_counts_MSE2) +
+  geom_bar(stat = "identity",
+           position = position_dodge(0.9)) +
+  geom_errorbar(aes(x = Treatment,
+                    ymin = M - 1.96 * SE,
+                    ymax = M + 1.96 * SE),
+                width = 0,
+                position = position_dodge(0.9)) +
+  labs(x = "Treatment",
+       y = "Avg Count",
+       fill = "Cell Type") +
+  scale_fill_viridis_d(option = "mako",
+                       begin = 0.2,
+                       end = 0.8) +
+  scale_y_continuous(limits = c(0,100),
+                     expand = c(0, 0)) +
+  theme_classic() +
+  theme(legend.position = "none")
+
+plot_cell_MSE_clust2
+
+
+#Stack Plot
+plot_cell_MSE_stack2 = ggplot(aes(x = Treatment,
+                                 y = M,
+                                 fill = Type),
+                             data = df_counts_MSE2) +
+  geom_bar(stat = "identity") +
+  labs(x = "Treatment",
+       y = "Average Count",
+       fill = "Cell Type") +
+  scale_fill_viridis_d(option = "mako",
+                       begin = 0.2,
+                       end = 0.8) +
+  scale_y_continuous(limits = c(0,100),
+                     expand = c(0, 0)) +
+  scale_x_discrete(labels = c("PBS", "KA, 3ppm", "KA, 30ppm")) +  # Rename treatment levels
+  theme_classic() +
+  theme(panel.border = element_rect(fill = NA)) +
+  theme(axis.text = element_text(size = 8), 
+        axis.title = element_text(size = 8),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 9),
+        axis.title.x = element_text(size = 8),  # Set the x-axis label size
+        axis.title.y = element_text(size = 8)) +
+  coord_flip() #To flip graph horizontally
+
+plot_cell_MSE_stack2
+```
+
+```{r}
+#Paper
+tiff(filename = 'CellCounts.tiff', height = 60, width = 150, units = "mm", res = 400) #defines png, res is in dpi, h & w in pixels
+
+plot_cell_MSE_stack2 #plot the plot
+
+
+dev.off() # turns off graphics device and exports the plot
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# BONUS - Messing around with survival analysis ----
+# (We won't be using this but I'm leaving this for future reference)
+data_exp$RT = data_exp$RightingTime
+data_exp$RTcens = ifelse(data_exp$RT == 1800, 0, 1) # censoring
+
+data_exp$Treatment = relevel(data_exp$Treatment, ref = "PBS")
+
+CoxmodRT = coxme(Surv(time = RT, 
+                      event = RTcens) ~ 
+                   Treatment * Day + (1 | Tank/SSID),
+                 data = data_exp)
+
+CoxmodRTn = coxme(Surv(time = RT,
+                       event = RTcens) ~
+                    Day + (1 | Tank/SSID),
+                  data = data_exp)
+
+anova(CoxmodRT,
+      CoxmodRTn,
+      test = "Chisq")
+
+summary(CoxmodRT)
+
+
+CoxmodRTpred = predict_coxme(CoxmodRT,
+                             type = "risk",
+                             se.fit = TRUE)
+
+
+data_exp$Coxmodpred = CoxmodRTpred$fit[,1]
+data_exp$CoxmodpredSE = CoxmodRTpred$se.fit[,1]
+
+Coxmodpred_MSE = data_exp %>%
+  group_by(Treatment, Day) %>%
+  summarize(M = mean(Coxmodpred),
+            SE = sd(Coxmodpred) / sqrt(length(Coxmodpred)))
+
+ggplot(data = Coxmodpred_MSE) +
+  # geom_line(aes(y = M,
+  #                x = Day,
+  #                color = Treatment),
+  #           size = 2) +
+  geom_ribbon(aes(x = Day,
+                  ymin = exp(log(Coxmodpred) - 1.96 * CoxmodpredSE),
+                  ymax = exp(log(Coxmodpred) + 1.96 * CoxmodpredSE),
+                  group = SSID,
+                  fill = Treatment),
+              alpha = 0.01,
+              data = data_exp) +
+  geom_line(aes(y = Coxmodpred,
+                x = Day,
+                color = Treatment,
+                group = SSID),
+            linetype = 2,
+            alpha = 0.5,
+            data = data_exp)
+
+summary(CoxmodRT)
+CoxmodRT
+
+
+library(lme4)
+lmer.AC = lmer(ArmCircProp ~ Treatment * Day + (1|Tank/SSID),
+               data = data_exp)
+summary(lmer.AC)
+
+anova.AC = aov(ArmCircProp ~ Treatment, data = data_exp[data_exp$Day == 7, ])
+summary(anova.AC)
+TukeyHSD(anova.AC)
+boxplot(ArmCircProp ~ Treatment, data = data_exp[data_exp$Day == 7, ])
+```
+
+
