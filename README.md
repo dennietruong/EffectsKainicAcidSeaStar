@@ -10,4 +10,4 @@ Data are uploaded in the data folder containing 5 csv:
 * DatasheetSSDAFinal = Domoic acid quantification results for Pisaster ochraceus
 
 
-The paper is currently in the process of being published. All data and code will be made available once the paper is officially published.
+#### The paper is currently in the process of being published. All data and code will be made available once the paper is officially published.
