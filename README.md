@@ -8,3 +8,6 @@ Data are uploaded in the data folder containing 5 csv:
 * ELISACode = ELISA results from 5 randomly chosen Asterias forbesi to detect baseline domoic acid present
 * CellCounts2 = Cell count results from coelomocyte study
 * DatasheetSSDAFinal = Domoic acid quantification results for Pisaster ochraceus
+
+
+The paper is currently in the process of being published. All data and code will be made available once the paper is officially published.
