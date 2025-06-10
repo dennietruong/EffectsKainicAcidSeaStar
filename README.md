@@ -1,5 +1,5 @@
 # Sea-star-experiment
-Marine and synthetic neurotoxins accumulate in and immobilize intertidal sea stars
+Marine and synthetic glutamatergic neurotoxins accumulate in and immobilize intertidal sea stars
 
 
 Data are uploaded in the data folder containing data (in csv format):
