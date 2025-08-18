@@ -1,0 +1,506 @@
+
+# Data analysis for Kainic Acid experiment
+# Insert chunk quickly using: Ctrl+Alt+I
+# Comment codes: Ctrl+Shift+C
+
+
+
+```{r}
+# 1: Getting Started -----------------------------------------------------------
+# > 1.1: Clear everything ----- 
+# clear workspace
+# rm(list=ls()) # Commented out to avoid wiping someone's environment
+
+# clear console
+cat("\014")
+```
+
+
+```{r}
+# > 1.2: Load packages ---------------------------------------------------------
+library(dplyr) # data wrangling
+library(tidyr) # tidyr
+library(ggplot2) # plotting
+library(glmmTMB) # generalized linear mixed effects models
+library(DHARMa) # glm diagnostics
+library(here) # here
+library(viridis) # viridis color ramps
+library(splines) # splines
+library(MuMIn) # multimodel inference
+library(survival) # survival analyses
+library(coxme) # mixed effects Cox models
+library(ehahelper) # event history analysis helper, predict_coxme
+library(emmeans)
+library(nnet) # for multinomial logistic regression
+library(patchwork) # arranging plot panels
+library(viridis)
+library(png)
+```
+
+
+
+```{r}
+# > 1.3: Working directory with here() -----------------------------------------
+here::i_am("Figure4.Rmd")
+```
+
+
+```{r}
+# > 1.4: Read in data ----
+data = read.csv(here("Experiment_RightingArmCircumData.csv"))
+metadata = read.csv(here("Experiment_BaselineData.csv"))
+```
+
+
+```{r}
+# > 1.5: Data preparation ------------------------------------------------------
+data$Date2 = as.Date(data$Date,
+                     format = "%m/%d/%y") # convert to date
+data$Day = data$Date2 - min(data$Date2) # subtract dates to convert to days
+data$Day = as.numeric(data$Day) # convert days to numeric days
+data$Day = data$Day - 4 # make time = 0 at experiment start day
+# Assign NAs to pre-experiment time points
+data$Day = ifelse(data$Day < 0, # if the day is negative
+                  NA, # make NA
+                  data$Day) # else assign the same day
+
+data$Treatment = as.factor(data$Treatment) # make Treatment a factor
+data$Tank = as.factor(paste0("T",data$Tank)) # make Tank a factor, tack on "T" to read as characters
+data$SSID = as.factor(data$SSID)  # make SSID a factor
+
+# Attach baseline arm circumference
+metadata$ArmCircumferenceBase = metadata$ArmCircumference
+metadata$ArmCircumference = NULL
+metadata$Date = NULL
+metadata$RightingTime = NULL
+metadata$Treatment = NULL
+metadata$Tank = NULL
+metadata$Mass = NULL
+metadata$Color = NULL
+
+# Merge metadata and data
+metadata = merge(metadata,
+                 data[is.na(data$Day), c("SSID", "RightingTime")])
+metadata$RightingTimeBase = metadata$RightingTime
+metadata$RightingTime = NULL
+
+data = merge(data, metadata, by = "SSID")
+
+# Add seatable
+ST1 = c("T1", "T2", "T3", "T4", "7", "T8", "T9", "T10")
+ST2 = c("T5", "T6", "T11", "T12")
+
+data$Seatable = ifelse(data$Tank %in% ST1,
+                       "Seatable 1",
+                       "Seatable 2")
+data$Seatable = as.factor(data$Seatable)
+```
+
+
+
+```{r}
+# Calculate righting times and arm circumferences as proportions of 
+# pre-exp/baseline values
+data$ArmCircPercentChange = ((data$ArmCircumference - data$ArmCircumferenceBase) / data$ArmCircumferenceBase) * 100
+data$RightingTimePercentChange = ((data$RightingTime - data$RightingTimeBase)/ data$RightingTimeBase) * 100
+
+
+# Calculate righting times and arm circumferences as proportions of 
+# pre-exp/baseline values
+data$ArmCircProp = (data$ArmCircumference / data$ArmCircumferenceBase) * 100
+data$RightingTimeProp = (data$RightingTime / data$RightingTimeBase) * 100
+
+# Separate experiment data and baseline data 
+# We'll only analyze the experiment data
+data_exp = data[!is.na(data$Day),]
+data_base = data[is.na(data$Day),]
+```
+
+
+
+
+
+# 2: Analyses ------------------------------------------------------------------
+```{r}
+# > 2.1: Models ----------------------------------------------------------------
+# Righting Time
+
+# Because the regular Gamma GLM wasn't flexible enough to account for the rapid 
+# change in righting time over time, we'll use natural cubic splines with Day 
+# to add some wiggliness.
+
+# Generally, we want to choose a model flexible enough to represent the data
+# but not so flexible that it exactly reproduces the data. Exactly reproducing
+# the data results from what is called "overfitting", which tends to make the 
+# model less applicable outside of the dataset (e.g. applied to the real world)
+
+# spline with 5 degrees of freedom (most flexible)
+modRT_treat5 = glmmTMB(RightingTimeProp ~ 
+                         Treatment *
+                         ns(Day, df = 5) + 
+                         (1|Seatable/Tank/SSID),
+                       data = data_exp,
+                       family = Gamma(link = "log"))
+# spline with 4 degrees of freedom 
+modRT_treat4 = glmmTMB(RightingTimeProp ~ 
+                         Treatment *
+                         ns(Day, df = 4) + 
+                         (1|Seatable/Tank/SSID),
+                       data = data_exp,
+                       family = Gamma(link = "log"))
+summary(modRT_treat4)
+simulateResiduals(modRT_treat4, plot = TRUE)
+# spline with 3 degrees of freedom 
+modRT_treat3 = glmmTMB(RightingTimeProp ~ 
+                         Treatment *
+                         ns(Day, df = 3) + 
+                         (1|Seatable/Tank/SSID),
+                       data = data_exp,
+                       family = Gamma(link = "log"))
+# spline with 2 degrees of freedom 
+modRT_treat2 = glmmTMB(RightingTimeProp ~ 
+                         Treatment *
+                         ns(Day, df = 2) + 
+                         (1|Seatable/Tank/SSID),
+                       data = data_exp,
+                       family = Gamma(link = "log"))
+# no spline (least flexible)
+modRT_treat = glmmTMB(RightingTimeProp ~ 
+                        Treatment *
+                        Day + 
+                        (1|Seatable/Tank/SSID),
+                      data = data_exp,
+                      family = Gamma(link = "log"))
+```
+
+
+
+Checking AICs for model fit
+```{r}
+pairs(emmeans(modRT_treat4,
+              ~ Treatment))
+
+# DHARMa residuals are used to diagnose/detect problems in generalized linear
+# models. You'll see red here, which means there are some potential issues, but
+# it doesn't mean the model is useless (poor residuals do not necessarily mean
+# a bad model, and lack of problem detection also does not guarantee a good 
+# model)
+simulateResiduals(modRT_treat4,
+                  plot = TRUE)
+# You could do the above with any of the models to check them
+
+# null model
+modRT_null = glmmTMB(RightingTimeProp ~ ns(Day, df = 4) + (1|Seatable/Tank/SSID),
+                     data = data_exp,
+                     family = Gamma(link = "log"))
+
+summary(modRT_null)
+
+# Lastly, just as a check, let's compare the df=4 spline to the null model
+# treatment w/ df=4 spline vs. null
+anova(modRT_treat4,
+      modRT_null,
+      test = "Chisq") # significant
+
+# Here, both the information theoretic (AICc) approach and stepwise LRTs gave
+# us the same result - the model including the df=4 spline is the best model.
+
+# Let's inspect the model
+# Generally, I try to do this at the end of model comparison/selection to avoid
+# biasing myself towards significant results.
+summary(modRT_treat4)
+# Whoa, lots of stars! I mentioned this before, but these by-paramter tests, 
+# called "Wald tests" can have a number of issues, to the degree that some 
+# package writers explicitly do not provide them. So while the significant 
+# p-values are enticing, we have to take them with a grain of salt. Sometimes 
+# parameters or variables are non-significant by matter a lot in the prediction. 
+# Sometimes weak or unimportant parameters are significant, which can happen 
+# easily when you have many data points (though we don't have that many points).
+# Still these estimates and related values tell you how each variable "tunes" 
+# the model, so this output is nonetheless valuable to look at.
+
+# (Personally, the df = 4 spline model still feels too wiggly, but that's what
+# the methods highlighted as the best... Oh well!)
+```
+
+
+
+
+
+```{r}
+# ArmCirc
+modAC_treat = glmmTMB(ArmCircProp ~ Treatment * Day + (1|Seatable/Tank/SSID),
+                      family = gaussian(),
+                      data = data_exp)
+
+simulateResiduals(modAC_treat,
+                  plot = TRUE)
+
+modAC_null = glmmTMB(ArmCircProp ~ Day + (1|Seatable/Tank/SSID),
+                     family = gaussian(),
+                     data = data_exp)
+
+summary(modAC_null)
+
+summary(modAC_treat)
+```
+
+
+
+# 2.2: Likelihood Ratio Test -------------------------------------------------
+```{r}
+# null righting time model vs. df = 4 spline (same as above)
+#Use this p-value to report on poster
+anova(modRT_null,
+      modRT_treat4,
+      test = "Chisq")
+
+
+# null arm circumference vs. including Treatment (no spline needed here)
+#Use this p-value to report on poster
+anova(modAC_null,
+      modAC_treat,
+      test = "Chisq")
+```
+
+
+
+
+# 2.3: Simulate predictions --------------------------------------------------
+```{r}
+# Create a data frame with all Day and Treatment combinations for use in
+# extracting model predictions. Note that we set the Tank and SSID to be the
+# same for everything. At a later step, we tell the predict function to not
+# include the random effects (Tank and SSID), so we don't need to include all
+# of them in this data frame.
+data_pred = data.frame(Treatment = c(rep("PBS", 29),
+                                     rep("1X_KA", 29),
+                                     rep("10X_KA", 29)),
+                       Day = rep(seq(0,7,0.25), 3),
+                       Tank = rep("T1" ,87),
+                       SSID = rep("1A", 87))
+length(seq(0,7,0.25))
+# Use the predict function to extract model predictions for righting time
+resRT_pred = predict(modRT_treat4, # our best model
+                     newdata = data_pred, # the prediction data frame
+                     se.fit = TRUE, # yes, we want the standard errors computed
+                     type = "response", # predictions as original scale
+                     re.form = ~ 0) # ignore random effects
+
+data_pred$RightingTimeProp = resRT_pred$fit # attach prediction to data frame
+data_pred$RightingTimePropSE = resRT_pred$se.fit # attach SE to data frame
+data_pred$RightingTimePercentChange = data_pred$RightingTimeProp - 100 #Calculate % change from model prediction
+
+
+
+# Do the same as above for arm ciricumference
+resAC_pred = predict(modAC_treat,
+                     newdata = data_pred,
+                     se.fit = TRUE,
+                     type = "response",
+                     re.form = ~ 0)
+
+data_pred$ArmCircProp = resAC_pred$fit
+data_pred$ArmCircPropSE = resAC_pred$se.fit
+data_pred$ArmCircPercentChange = data_pred$ArmCircProp - 100 #Calculate % change from model prediction
+```
+
+
+
+# 2.4: Plot predictions ------------------------------------------------------
+```{r}
+# Aggregate righting time data into means and standard deviations
+RightingTimeMSD = data_exp %>%
+  group_by(Treatment, Day) %>% # group by Treatment and Day
+  summarise(M = mean(RightingTimePercentChange), # Mean
+            SD = sd(RightingTimePercentChange), # Standard Deviation
+            SE = SD/sqrt(length(RightingTimePercentChange))) #Standard Error
+
+# Plot Righting Time Data and Predictions
+plot_predRightTime = ggplot() +
+  geom_ribbon(aes(x = Day, # plot 95% CI for model predictions as shaded ribbon
+                  ymin = RightingTimePercentChange - (1.96 * RightingTimePropSE),
+                  ymax = RightingTimePercentChange + (1.96 * RightingTimePropSE),
+                  fill = Treatment),
+              alpha = 0.2,
+              data = data_pred) +
+  geom_line(aes(x = Day, # plot model predictions
+                y = RightingTimePercentChange,
+                color = Treatment),
+            size = 0.5,
+            data = data_pred) +
+  geom_point(aes(x = Day, # plot individual observed data points
+                y = RightingTimePercentChange,
+                color = Treatment,
+                group = SSID),
+            position = position_dodge(0.2), # dodging to prevent overlap
+            size = 1,
+            alpha = 0.2,
+            data = data_exp) +
+  geom_errorbar(aes(x = Day, # plot standard error bars for observed data points
+                    ymin = M - SE,
+                    ymax = M + SE,
+                    group = Treatment),
+                width = 0,
+                position = position_dodge(0.2), # dodging to prevent overlap
+                data = RightingTimeMSD,
+                size = 0.4) +
+  geom_point(aes(x = Day, # plot means for observed data points
+                 y = M,
+                 fill = Treatment),
+             size = 2,
+             shape = 21,
+             position = position_dodge(0.2), # dodging to prevent overlap
+             data = RightingTimeMSD) +
+  scale_color_manual(values = c("firebrick",
+                                "darkorange",
+                                "deepskyblue"),
+                     labels = c(expression(paste("30 ", mu, "g KA ", g^-1, " bm")),
+                                expression(paste("3 ", mu, "g KA ", g^-1, " bm")),
+                                "PBS")) +
+  scale_fill_manual(values = c("firebrick",
+                               "darkorange",
+                               "deepskyblue"),
+                    labels = c(expression(paste("30 ", mu, "g KA ", g^-1, " bm")),
+                                expression(paste("3 ", mu, "g KA ", g^-1, " bm")),
+                                "PBS")) +
+  labs(x = "Experiment Day",
+       y = "Righting Time \n(Percent Change)") +
+  coord_cartesian(xlim = c(-0.2, 7.2),
+                  ylim = c(-100, 1800),
+                  expand = FALSE) +
+  scale_y_continuous(
+    breaks = seq(0, 2000, by = 200)) +  # Set y-axis breaks at intervals of 200
+  theme_bw() +
+  theme(panel.border = element_rect(fill = NA)) +
+  theme(axis.text = element_text(size = 8), 
+        axis.title = element_text(size = 9),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(0.5, 'mm'),
+        axis.title.x = element_text(size = 9),  # Set the x-axis label size
+        axis.title.y = element_text(size = 9)) +  # Set the y-axis label size
+  theme(legend.position = c(0.76,0.87)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())  #Remove gridlines
+
+plot_predRightTime
+```
+
+
+
+
+Modify to include mean & lines
+```{r}
+# Aggregate righting time data into means and standard deviations
+ArmCircMSD = data_exp %>%
+  group_by(Treatment, Day) %>% # group by Treatment and Day
+  summarise(M = mean(ArmCircPercentChange), # Mean
+            SD = sd(ArmCircPercentChange), # Standard Deviation
+            SE = SD/sqrt(length(ArmCircPercentChange))) #Standard Error
+
+
+# Plot Arm Circumference Data and Predictions
+plot_predArmCirc = ggplot() +
+  geom_ribbon(aes(x = Day,
+                  ymin = ArmCircPercentChange - (1.96 * ArmCircPropSE),
+                  ymax = ArmCircPercentChange + (1.96 * ArmCircPropSE),
+                  fill = Treatment),
+              alpha = 0.2,
+              data = data_pred) +
+  geom_line(aes(x = Day,
+                y = ArmCircPercentChange,
+                color = Treatment),
+            size = 0.5,
+            data = data_pred) +
+  geom_point(aes(x = Day,        # plot individual observed data points
+                y = ArmCircPercentChange,
+                color = Treatment,
+                group = SSID),
+            size = 1,
+            alpha = 0.3,
+            data = data_exp) +
+  geom_errorbar(aes(x = Day, # plot standard error bars for observed data points
+                    ymin = M - SE,
+                    ymax = M + SE,
+                    group = Treatment),
+                width = 0,
+                position = position_dodge(0.2), # dodging to prevent overlap
+                data = ArmCircMSD,
+                size = 0.4) +
+  geom_point(aes(x = Day, # plot means for observed data points
+                 y = M,
+                 fill = Treatment),
+             size = 2,
+             shape = 21,
+             position = position_dodge(0.2), # dodging to prevent overlap
+             data = ArmCircMSD) +
+  #geom_vline(xintercept = c(1, 2.5, 5),
+             #alpha = 0.25,
+             #linetype = 2) +
+  scale_color_manual(values = c("firebrick",
+                                "darkorange",
+                                "deepskyblue"),
+                     labels = c("KA, 30 ppm",
+                                "KA, 3 ppm",
+                                "PBS")) +
+  scale_fill_manual(values = c("firebrick",
+                               "darkorange",
+                               "deepskyblue"),
+                    labels = c("KA, 30 ppm",
+                               "KA, 3 ppm",
+                               "PBS")) +
+  labs(x = "Experiment Day",
+       y = "Arm Circumference\n(Percent Change)") +
+  coord_cartesian(xlim = c(-0.2, 7.2),
+                  ylim = c(-45, 20),
+                  expand = FALSE) +
+  scale_y_continuous(
+    breaks = seq(-40, 20, by = 10)) +  # Set y-axis breaks at intervals of 10
+  theme_bw() +
+  theme(panel.border = element_rect(fill = NA)) +
+  theme(axis.text = element_text(size = 8), 
+        axis.title = element_text(size = 9),
+        axis.title.x = element_text(size = 9),  # Set the x-axis label size
+        axis.title.y = element_text(size = 9)) +  # Set the y-axis label size)
+  theme(legend.position = 'none') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())  #Remove gridlines
+  
+
+plot_predArmCirc
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Put Righhting Time & Arm Circumference Plot together
+```{r}
+library(cowplot)
+
+
+Right_Arm <- plot_grid(plot_predRightTime, plot_predArmCirc, labels = "AUTO", label_size = 15, align = "v", hjust= -0.3, vjust = 2, scale = 1)
+
+
+#Paper
+tiff(filename = 'Figure4.tiff', height = 95, width = 169, units = "mm", res = 400) #Check resolution and format, 6 across x 4height
+
+#Presentation
+#tiff(filename = 'Right_ArmPresent.tiff', height = 95, width = 250, units = "mm", res = 400) #Check resolution and format, 6 across x4height
+Right_Arm #plot the plot
+
+
+pdf('Figure4.pdf', height = 125/25.4, width = 169/25.4)  # Convert mm to inches
+Right_Arm #plot the plot
+
+
+dev.off() # turns off graphics device and exports the plot
+```
