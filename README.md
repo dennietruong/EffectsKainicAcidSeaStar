@@ -10,7 +10,7 @@ Raw data are uploaded in the data folder containing data (in csv format):
 * ELISAAsteriasData = ELISA results from 5 randomly chosen Asterias forbesi to detect baseline domoic acid present
 * ELISAPisastersData = ELISA results from Pisaster ochraceus observational study
 
-
+<br />
 
 Raw data for supplemental figures:
 * CellCounts = Cell count results from coelomocyte study
